@@ -2,14 +2,20 @@ package db
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 	"os"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type DB interface {
 	Insert(string) error
 	GetActive() (string, error)
 	NextActive() error
+	ActiveUpdater()
 }
 
 type source struct {
@@ -43,12 +49,12 @@ func (s *source) Insert(str string) error {
 func (s *source) NextActive() error {
 	_, err := s.db.Exec(`
 		with current_active as (
-			select id from strings where active = true
+			select id from strings where active = true limit 1
 		),
 		next_active as (
 			select coalesce(
-				(select id from strings where id = (select id from current_active) + 1),
-				1
+				(select id from strings where id > (select id from current_active) limit 1),
+				(select id from strings order by id asc limit 1)
 			) as id
 		)
 		update strings
@@ -71,6 +77,24 @@ func (s *source) GetActive() (string, error) {
 	return str, err
 }
 
+func (s *source) ActiveUpdater() {
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if err := s.NextActive(); err != nil {
+					log.Printf("Failed to set next active string: %v", err)
+				} else {
+					log.Println("Successfully set the next active string.")
+				}
+			}
+		}
+	}()
+}
+
 func Exists(addr *string) bool {
 	a := DefaultDBAddress
 	if addr != nil {
@@ -80,7 +104,17 @@ func Exists(addr *string) bool {
 		return false
 	}
 
-	return true
+	db, err := sql.Open("sqlite3", a)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	exists, eErr := tableExists(db, "strings")
+	if eErr != nil {
+		log.Fatal(eErr)
+	}
+
+	return exists
 }
 
 func Create(addr *string) error {
@@ -95,17 +129,20 @@ func Create(addr *string) error {
 	createTableSQL := `create table if not exists strings (
 		id integer not null primary key,
 		string text not null unique,
-		active boolean not null
+		active boolean not null default false
     );
     `
 
 	db, err := sql.Open("sqlite3", a)
-
-	if _, err := db.Exec(createTableSQL); err != nil {
+	if err != nil {
 		log.Fatal(err)
 	}
 
-	return err
+	if _, eErr := db.Exec(createTableSQL); eErr != nil {
+		log.Fatal(eErr)
+	}
+
+	return nil
 }
 
 func Open(addr string) (DB, error) {
@@ -119,4 +156,17 @@ func Open(addr string) (DB, error) {
 
 func Close(d DB) error {
 	return d.(*source).db.Close()
+}
+
+func tableExists(db *sql.DB, tableName string) (bool, error) {
+	query := fmt.Sprintf("SELECT name FROM sqlite_master WHERE type='table' AND name='%s';", tableName)
+	var name string
+	err := db.QueryRow(query).Scan(&name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return name == tableName, nil
 }

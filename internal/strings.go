@@ -1,7 +1,7 @@
 package strings
 
 import (
-	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"stringy-go/internal/db"
@@ -24,8 +24,8 @@ func NewServer(db db.DB) Server {
 func (s *server) Run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/string", s.getString)
-	mux.HandleFunc("/string", s.postString)
-	return http.ListenAndServe(":6969", nil)
+	mux.HandleFunc("/save", s.postString)
+	return http.ListenAndServe(":6969", mux)
 }
 
 func (s *server) getString(w http.ResponseWriter, r *http.Request) {
@@ -58,11 +58,16 @@ func (s *server) postString(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var str string
-	if err := json.NewDecoder(r.Body).Decode(&str); err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 		return
 	}
+	defer func() {
+		_ = r.Body.Close()
+	}()
+
+	str := string(body)
 
 	if err := s.DB.Insert(str); err != nil {
 		log.Println(err)
